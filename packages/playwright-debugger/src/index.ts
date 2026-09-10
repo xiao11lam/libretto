@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { relative, win32 } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, relative, win32 } from "node:path";
 import { z } from "zod";
 import {
   generateText,
@@ -12,9 +13,10 @@ import {
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAiSdkBrowserToolsForPage } from "libretto-browser-tools/ai-sdk";
-import type { Page } from "playwright";
+import type { Browser, Page } from "playwright";
 
 export type SupportedAgentProvider = "anthropic" | "openai";
+export type AutomationFramework = "playwright" | "selenium";
 
 export type GitHubDebuggerConfig = {
   owner: string;
@@ -63,6 +65,7 @@ export type AgentFix = {
 };
 
 export type DebugAgentContext = {
+  framework: AutomationFramework;
   model: {
     provider: SupportedAgentProvider;
     modelId: string;
@@ -82,6 +85,13 @@ export type PlaywrightDebuggerOptions = {
   fetch?: typeof fetch;
   now?: () => Date;
 };
+
+type SeleniumBrowserConnection = {
+  browser: Browser;
+  disconnect(): Promise<void>;
+};
+
+export type SeleniumDebuggerOptions = PlaywrightDebuggerOptions;
 
 export type DebugFailureOptions = {
   includeFiles?: string[];
@@ -112,6 +122,45 @@ export type PlaywrightDebugger = {
   debugFailure: (
     error: unknown,
     page: Page,
+    options?: DebugFailureOptions,
+  ) => Promise<DebugFailureResult>;
+};
+
+export type SeleniumCapabilities =
+  | {
+      get(name: string): unknown;
+    }
+  | Readonly<Record<string, unknown>>;
+
+export type SeleniumWebDriver = {
+  getCapabilities(): Promise<SeleniumCapabilities>;
+  getCurrentUrl(): Promise<string>;
+  getTitle(): Promise<string>;
+  getWindowHandle(): Promise<string>;
+};
+
+export type SeleniumDebugger = {
+  debugFailure: (
+    error: unknown,
+    driver: SeleniumWebDriver,
+    options?: DebugFailureOptions,
+  ) => Promise<DebugFailureResult>;
+};
+
+type DebugPageSession = {
+  page: Page;
+  dispose(): Promise<void>;
+};
+
+type DebugTargetAdapter<TTarget> = {
+  framework: AutomationFramework;
+  connect(target: TTarget): Promise<DebugPageSession>;
+};
+
+type AutomationDebugger<TTarget> = {
+  debugFailure: (
+    error: unknown,
+    target: TTarget,
     options?: DebugFailureOptions,
   ) => Promise<DebugFailureResult>;
 };
@@ -171,6 +220,28 @@ const agentFixSchema = z.object({
 export function createPlaywrightDebugger(
   options: PlaywrightDebuggerOptions,
 ): PlaywrightDebugger {
+  return createAutomationDebugger(options, {
+    framework: "playwright",
+    connect: async (page) => ({
+      page,
+      dispose: async () => undefined,
+    }),
+  });
+}
+
+export function createSeleniumDebugger(
+  options: SeleniumDebuggerOptions,
+): SeleniumDebugger {
+  return createAutomationDebugger(options, {
+    framework: "selenium",
+    connect: connectSeleniumDriver,
+  });
+}
+
+function createAutomationDebugger<TTarget>(
+  options: PlaywrightDebuggerOptions,
+  adapter: DebugTargetAdapter<TTarget>,
+): AutomationDebugger<TTarget> {
   const model = parseAgentModel(options.agent.model);
   const maxSourceFileBytes =
     options.agent.maxSourceFileBytes ?? DEFAULT_MAX_SOURCE_FILE_BYTES;
@@ -178,10 +249,16 @@ export function createPlaywrightDebugger(
 
   const runDebugFailure = async (
     error: unknown,
-    page: Page,
+    target: TTarget,
     failureOptions: DebugFailureOptions,
   ): Promise<DebugFailureResult> => {
-      const failure = await captureFailureContext(error, page);
+    const pageSession = await adapter.connect(target);
+    try {
+      const failure = await captureFailureContext(
+        error,
+        pageSession.page,
+        adapter.framework,
+      );
       const github = await GitHubClient.create({
         config: options.github,
         fetchImpl: options.fetch ?? globalThis.fetch,
@@ -202,9 +279,14 @@ export function createPlaywrightDebugger(
       const runner =
         options.modelRunner ??
         ((context: DebugAgentContext) =>
-          runBrowserToolsDebugAgent(context, page, options.agent.apiKey));
+          runBrowserToolsDebugAgent(
+            context,
+            pageSession.page,
+            options.agent.apiKey,
+          ));
       const fix = agentFixSchema.parse(
         await runner({
+          framework: adapter.framework,
           model,
           failure,
           sourceFiles,
@@ -231,7 +313,7 @@ export function createPlaywrightDebugger(
         baseCommitSha: base.commitSha,
         baseTreeSha: base.treeSha,
         changes,
-        message: "Apply Libretto autofix for Playwright failure",
+        message: `Apply Libretto autofix for ${frameworkName(adapter.framework)} failure`,
       });
       await github.updateBranch(branchName, commitSha);
       const pullRequestUrl = await github.openPullRequest({
@@ -241,6 +323,7 @@ export function createPlaywrightDebugger(
         body: createPullRequestBody({
           fix,
           failure,
+          framework: adapter.framework,
           sourceFiles,
           changedFiles: changes.map((change) => change.path),
         }),
@@ -255,12 +338,15 @@ export function createPlaywrightDebugger(
         changedFiles: changes.map((change) => change.path),
         sourceFiles,
       };
+    } finally {
+      await pageSession.dispose();
+    }
   };
 
   return {
-    async debugFailure(error, page, failureOptions = {}) {
+    async debugFailure(error, target, failureOptions = {}) {
       try {
-        return await runDebugFailure(error, page, failureOptions);
+        return await runDebugFailure(error, target, failureOptions);
       } catch (debuggerError) {
         return {
           status: "debugger_failed",
@@ -273,6 +359,197 @@ export function createPlaywrightDebugger(
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function frameworkName(framework: AutomationFramework): "Playwright" | "Selenium" {
+  return framework === "selenium" ? "Selenium" : "Playwright";
+}
+
+async function connectSeleniumDriver(
+  driver: SeleniumWebDriver,
+): Promise<DebugPageSession> {
+  const capabilities = await driver.getCapabilities();
+  const browserName = readCapability(capabilities, "browserName");
+  if (!isSupportedSeleniumBrowser(browserName)) {
+    throw new Error(
+      `Selenium debugging supports Chrome and Microsoft Edge. The current session reports ${describeCapability(browserName)}. Keep using the Playwright debugger for Playwright pages, or start a Selenium Chrome/Edge session and call createSeleniumDebugger again.`,
+    );
+  }
+
+  const optionsKey = browserName.toLowerCase() === "chrome"
+    ? "goog:chromeOptions"
+    : "ms:edgeOptions";
+  const browserOptions = readCapability(capabilities, optionsKey);
+  const cdpEndpoint = readNonEmptyString(readCapability(capabilities, "se:cdp"))
+    ?? readDebuggerAddress(browserOptions);
+  if (!cdpEndpoint) {
+    throw new Error(
+      `The Selenium ${frameworkBrowserName(browserName)} session did not expose se:cdp or ${optionsKey}.debuggerAddress. Keep the WebDriver session open and pass its live driver to debugFailure before driver.quit().`,
+    );
+  }
+
+  const normalizedCdpEndpoint = normalizeCdpEndpoint(cdpEndpoint);
+  let connection: SeleniumBrowserConnection;
+  try {
+    connection = await connectIsolatedPlaywright(normalizedCdpEndpoint);
+  } catch (error) {
+    throw new Error(
+      `Could not attach Libretto to the Selenium ${frameworkBrowserName(browserName)} session at ${normalizedCdpEndpoint} (${formatError(error)}). Keep the WebDriver session open and call debugFailure before driver.quit().`,
+      { cause: error },
+    );
+  }
+
+  try {
+    return {
+      page: await findSeleniumPage(connection.browser, driver),
+      dispose: () => connection.disconnect(),
+    };
+  } catch (error) {
+    await connection.disconnect();
+    throw error;
+  }
+}
+
+type IsolatedPlaywrightRuntime = {
+  playwright: {
+    chromium: {
+      connectOverCDP(cdpEndpoint: string): Promise<Browser>;
+    };
+  };
+  stop(): Promise<void>;
+};
+
+type PlaywrightCoreBundle = {
+  oop?: {
+    start?: () => Promise<IsolatedPlaywrightRuntime>;
+  };
+};
+
+async function connectIsolatedPlaywright(
+  cdpEndpoint: string,
+): Promise<SeleniumBrowserConnection> {
+  const runtime = await startIsolatedPlaywrightRuntime();
+  try {
+    const browser = await runtime.playwright.chromium.connectOverCDP(cdpEndpoint);
+    return {
+      browser,
+      disconnect: () => runtime.stop(),
+    };
+  } catch (error) {
+    await runtime.stop();
+    throw error;
+  }
+}
+
+async function startIsolatedPlaywrightRuntime(): Promise<IsolatedPlaywrightRuntime> {
+  const require = createRequire(import.meta.url);
+  const playwrightPackagePath = require.resolve("playwright/package.json");
+  const coreBundlePath = require.resolve("playwright-core/lib/coreBundle", {
+    paths: [dirname(playwrightPackagePath)],
+  });
+  const coreBundle = require(coreBundlePath) as PlaywrightCoreBundle;
+  if (typeof coreBundle.oop?.start !== "function") {
+    throw new Error(
+      "The installed Playwright package cannot start an isolated debugging client. Install the Playwright version required by libretto-playwright-debugger and retry.",
+    );
+  }
+  return coreBundle.oop.start();
+}
+
+function readCapability(
+  capabilities: SeleniumCapabilities,
+  name: string,
+): unknown {
+  const get = (capabilities as { get?: unknown }).get;
+  if (typeof get === "function") {
+    return get.call(capabilities, name);
+  }
+  return (capabilities as Readonly<Record<string, unknown>>)[name];
+}
+
+function isSupportedSeleniumBrowser(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const browserName = value.toLowerCase();
+  return browserName === "chrome" || browserName === "microsoftedge";
+}
+
+function frameworkBrowserName(browserName: string): "Chrome" | "Microsoft Edge" {
+  return browserName.toLowerCase() === "chrome" ? "Chrome" : "Microsoft Edge";
+}
+
+function describeCapability(value: unknown): string {
+  if (typeof value === "string" && value.length > 0) return `"${value}"`;
+  return "no browserName";
+}
+
+function readDebuggerAddress(browserOptions: unknown): string | null {
+  if (!browserOptions || typeof browserOptions !== "object") return null;
+  return readNonEmptyString(Reflect.get(browserOptions, "debuggerAddress"));
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function normalizeCdpEndpoint(debuggerAddress: string): string {
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(debuggerAddress)
+    ? debuggerAddress
+    : `http://${debuggerAddress}`;
+}
+
+async function findSeleniumPage(
+  browser: Browser,
+  driver: SeleniumWebDriver,
+): Promise<Page> {
+  const pages = browser.contexts().flatMap((context) => context.pages());
+  if (pages.length === 0) {
+    throw new Error(
+      "The Selenium Chrome/Edge session has no open pages. Open the failing page, keep the WebDriver session alive, and call debugFailure again.",
+    );
+  }
+
+  const currentWindowHandle = await driver.getWindowHandle();
+  const targetId = targetIdFromWindowHandle(currentWindowHandle);
+  if (targetId) {
+    for (const page of pages) {
+      const pageTargetId = await tryRead(() => readPageTargetId(page));
+      if (pageTargetId === targetId) return page;
+    }
+  }
+
+  const currentUrl = await driver.getCurrentUrl();
+  const urlMatches = pages.filter((page) => page.url() === currentUrl);
+  if (urlMatches.length === 1) return urlMatches[0]!;
+
+  const currentTitle = await driver.getTitle();
+  for (const page of urlMatches) {
+    if ((await tryRead(() => page.title())) === currentTitle) return page;
+  }
+
+  if (pages.length === 1) return pages[0]!;
+  throw new Error(
+    `Libretto could not match Selenium window ${currentWindowHandle} (${currentUrl}) to one of ${pages.length} Chrome/Edge pages. Switch Selenium to the failing tab before calling debugFailure, or close duplicate tabs and retry.`,
+  );
+}
+
+function targetIdFromWindowHandle(windowHandle: string): string | null {
+  const prefix = "CDwindow-";
+  return windowHandle.startsWith(prefix)
+    ? windowHandle.slice(prefix.length).toLowerCase()
+    : null;
+}
+
+async function readPageTargetId(page: Page): Promise<string | null> {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const response = await cdp.send("Target.getTargetInfo");
+    const targetId = response.targetInfo.targetId;
+    return typeof targetId === "string" ? targetId.toLowerCase() : null;
+  } finally {
+    await cdp.detach();
+  }
 }
 
 export function parseAgentModel(model: string): {
@@ -301,13 +578,14 @@ export function parseAgentModel(model: string): {
 async function captureFailureContext(
   error: unknown,
   page: Page,
+  framework: AutomationFramework,
 ): Promise<FailureContext> {
   const message =
     error instanceof Error
       ? error.message
       : typeof error === "string"
         ? error
-        : "Unknown Playwright failure";
+        : `Unknown ${frameworkName(framework)} failure`;
   const stack = error instanceof Error ? error.stack : undefined;
   const [url, title, screenshot, domSnapshot] = await Promise.all([
     tryRead(() => Promise.resolve(page.url())),
@@ -492,6 +770,7 @@ function slugify(value: string): string {
 function createPullRequestBody(args: {
   fix: AgentFix;
   failure: FailureContext;
+  framework: AutomationFramework;
   sourceFiles: SourceFile[];
   changedFiles: string[];
 }): string {
@@ -506,6 +785,7 @@ function createPullRequestBody(args: {
     "",
     "## Failure context",
     "",
+    `- Framework: ${frameworkName(args.framework)}`,
     `- Error: ${args.failure.message}`,
     args.failure.url ? `- URL: ${args.failure.url}` : null,
     args.failure.title ? `- Page title: ${args.failure.title}` : null,
@@ -524,24 +804,34 @@ function createPullRequestBody(args: {
 
 const DEFAULT_MAX_AGENT_STEPS = 24;
 
-const BROWSER_TOOLS_SYSTEM_PROMPT = [
-  "You are Libretto's autofix debugger. A Playwright browser automation just failed.",
-  "Your job is to find the ROOT CAUSE by investigating the LIVE website with the browser_* tools, then submit a minimal, correct fix.",
-  "",
-  "Method:",
-  "1. Read the failure (error message, stack, and source files) provided below.",
-  "2. Actively investigate the attached failed page instead of guessing. Use the provided session ID with `browser_snapshot` to read the live accessibility tree / DOM and `browser_exec` to probe the page (for example run `return await page.locator('input[name=\"login\"]').count()` to confirm whether a selector actually resolves).",
-  "3. Only once the live page confirms the real cause, call `submit_fix` with full-file replacements for the files that must change.",
-  "",
-  "Rules:",
-  "- Provide a concise PR title that describes the fix. Do not include the `[Libretto Agent]` prefix; the library adds it.",
-  "- Base the fix on what you actually observed in the browser, never on assumptions.",
-  "- Return COMPLETE file contents for each changed file, not diffs.",
-  "- Change as little as possible and do not touch unrelated code.",
-  "- Do not close the page, browser context, or browser.",
-  "- Prefer selectors that you verified exist on the live page.",
-  "- If the evidence is insufficient for a safe fix, call `submit_fix` with an empty `changes` array.",
-].join("\n");
+function createBrowserToolsSystemPrompt(
+  framework: AutomationFramework,
+): string {
+  const name = frameworkName(framework);
+  return [
+    `You are Libretto's autofix debugger. A ${name} browser automation just failed.`,
+    "Your job is to find the ROOT CAUSE by investigating the LIVE website with the browser_* tools, then submit a minimal, correct fix.",
+    "",
+    "Method:",
+    "1. Read the failure (error message, stack, and source files) provided below.",
+    "2. Actively investigate the attached failed page instead of guessing. Use the provided session ID with `browser_snapshot` to read the live accessibility tree / DOM and `browser_exec` to probe the page (for example run `return await page.locator('input[name=\"login\"]').count()` to confirm whether a selector actually resolves).",
+    "3. Only once the live page confirms the real cause, call `submit_fix` with full-file replacements for the files that must change.",
+    "",
+    "Rules:",
+    "- Provide a concise PR title that describes the fix. Do not include the `[Libretto Agent]` prefix; the library adds it.",
+    "- Base the fix on what you actually observed in the browser, never on assumptions.",
+    "- Return COMPLETE file contents for each changed file, not diffs.",
+    "- Change as little as possible and do not touch unrelated code.",
+    "- Do not close the page, browser context, or browser.",
+    "- Prefer selectors that you verified exist on the live page.",
+    framework === "selenium"
+      ? "- The browser_* tools use Playwright only for live inspection. Keep all proposed automation source changes in Selenium and do not migrate the workflow to Playwright."
+      : null,
+    "- If the evidence is insufficient for a safe fix, call `submit_fix` with an empty `changes` array.",
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
 
 async function runBrowserToolsDebugAgent(
   context: DebugAgentContext,
@@ -572,7 +862,7 @@ async function runBrowserToolsDebugAgent(
         stepCountIs(DEFAULT_MAX_AGENT_STEPS),
         hasToolCall("submit_fix"),
       ],
-      system: BROWSER_TOOLS_SYSTEM_PROMPT,
+      system: createBrowserToolsSystemPrompt(context.framework),
       messages: buildAgentMessages(context, browser.sessionId),
     });
   } finally {
@@ -639,7 +929,7 @@ function createAgentPrompt(
     )
     .join("\n\n");
   return [
-    "A Playwright browser automation failed. Investigate the live page and fix it.",
+    `A ${frameworkName(context.framework)} browser automation failed. Investigate the live page and fix it.`,
     `The failed page is already attached as browser session ${sessionId}.`,
     "",
     "Failure:",

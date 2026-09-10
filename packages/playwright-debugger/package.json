@@ -1,7 +1,7 @@
 {
   "name": "libretto-playwright-debugger",
   "version": "0.1.0",
-  "description": "Open GitHub autofix pull requests from failed Playwright runs",
+  "description": "Open GitHub autofix pull requests from failed Playwright and Selenium Chromium runs",
   "license": "MIT",
   "homepage": "https://libretto.sh",
   "repository": {

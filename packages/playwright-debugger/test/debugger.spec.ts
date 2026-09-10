@@ -1,10 +1,89 @@
-import type { Page } from "playwright";
-import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:net";
+import { chromium, type Browser, type Page } from "playwright";
+import { afterEach, describe, expect, it, test as base, vi } from "vitest";
 import {
   createPlaywrightDebugger,
+  createSeleniumDebugger,
   parseAgentModel,
   type DebugAgentRunner,
+  type SeleniumWebDriver,
 } from "../src/index.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+async function pickFreePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address && typeof address === "object") {
+        server.close(() => resolve(address.port));
+        return;
+      }
+      server.close(() => reject(new Error("Failed to resolve debug port")));
+    });
+  });
+}
+
+async function fetchWebSocketDebuggerUrl(port: number): Promise<string> {
+  const versionUrl = `http://127.0.0.1:${port}/json/version`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(versionUrl);
+      const version = (await response.json()) as {
+        webSocketDebuggerUrl?: string;
+      };
+      if (version.webSocketDebuggerUrl) return version.webSocketDebuggerUrl;
+    } catch {
+      // Chrome may need a moment to expose its debugger endpoint.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Could not read a CDP endpoint from ${versionUrl}`);
+}
+
+const browserTest = base.extend<{
+  seleniumBrowser: {
+    browser: Browser;
+    cdpEndpoint: string;
+    debuggerAddress: string;
+    page: Page;
+    windowHandle: string;
+  };
+}>({
+  seleniumBrowser: async ({}, use) => {
+    const port = await pickFreePort();
+    const browser = await chromium.launch({
+      headless: true,
+      args: [`--remote-debugging-port=${port}`],
+    });
+    const inactivePage = await browser.newPage();
+    await inactivePage.setContent(
+      "<html><head><title>Other tab</title></head><body><main>Do not inspect this tab</main></body></html>",
+    );
+    const page = await browser.newPage();
+    await page.setContent(
+      "<html><head><title>Selenium failure</title></head><body><main>Live Selenium state</main></body></html>",
+    );
+    const cdp = await page.context().newCDPSession(page);
+    const target = await cdp.send("Target.getTargetInfo");
+    await cdp.detach();
+
+    await use({
+      browser,
+      cdpEndpoint: await fetchWebSocketDebuggerUrl(port),
+      debuggerAddress: `127.0.0.1:${port}`,
+      page,
+      windowHandle: `CDwindow-${target.targetInfo.targetId}`,
+    });
+    await browser.close();
+  },
+});
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
@@ -80,6 +159,7 @@ describe("createPlaywrightDebugger", () => {
     }) as unknown as typeof fetch;
     const runner = vi.fn<DebugAgentRunner>(async (context) => {
       expect(context.model).toEqual({ provider: "openai", modelId: "gpt-5.4" });
+      expect(context.framework).toBe("playwright");
       expect(context.failure.message).toContain("Timeout");
       expect(context.failure.url).toBe("https://example.test/dashboard");
       expect(context.failure.title).toBe("Dashboard");
@@ -500,6 +580,248 @@ describe("createPlaywrightDebugger", () => {
     ).resolves.toMatchObject({
       status: "debugger_failed",
       error: expect.stringContaining("Unsafe repository path"),
+    });
+  });
+});
+
+describe("createSeleniumDebugger", () => {
+  describe.each([
+    {
+      browserName: "chrome",
+      optionsKey: "goog:chromeOptions",
+    },
+    {
+      browserName: "MicrosoftEdge",
+      optionsKey: "ms:edgeOptions",
+    },
+  ])("$browserName", ({ browserName, optionsKey }) => {
+    browserTest(
+      "attaches to the active tab and leaves Selenium running",
+      async ({ seleniumBrowser }) => {
+        const quit = vi.fn(async () => undefined);
+        const driver = {
+          getCapabilities: vi.fn(async () => ({
+            get: (name: string) => {
+              if (name === "browserName") return browserName;
+              if (name === optionsKey) {
+                return { debuggerAddress: seleniumBrowser.debuggerAddress };
+              }
+              return undefined;
+            },
+          })),
+          getWindowHandle: vi.fn(async () => seleniumBrowser.windowHandle),
+          getCurrentUrl: vi.fn(async () => seleniumBrowser.page.url()),
+          getTitle: vi.fn(async () => await seleniumBrowser.page.title()),
+          quit,
+        } satisfies SeleniumWebDriver & { quit(): Promise<void> };
+        const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+          const requestUrl = url.toString();
+          if (requestUrl.endsWith("/git/ref/heads/main")) {
+            return jsonResponse({ object: { sha: "base-commit" } });
+          }
+          if (requestUrl.endsWith("/git/commits/base-commit")) {
+            return jsonResponse({
+              sha: "base-commit",
+              tree: { sha: "base-tree" },
+            });
+          }
+          return jsonResponse({ message: "not found" }, { status: 404 });
+        }) as unknown as typeof fetch;
+        const runner = vi.fn<DebugAgentRunner>(async (context) => {
+          expect(context.framework).toBe("selenium");
+          expect(context.failure.title).toBe("Selenium failure");
+          expect(context.failure.domSnapshot).toContain("Live Selenium state");
+          return {
+            title: "No safe fix",
+            summary: "No safe fix found",
+            rationale: "The page needs more evidence.",
+            changes: [],
+          };
+        });
+        const debuggerInstance = createSeleniumDebugger({
+          github: {
+            owner: "acme",
+            repo: "automations",
+            baseBranch: "main",
+            token: "ghs_test",
+          },
+          agent: { model: "openai/gpt-5.4" },
+          fetch: fetchImpl,
+          modelRunner: runner,
+        });
+
+        const result = await debuggerInstance.debugFailure(
+          new Error("element click intercepted"),
+          driver,
+        );
+
+        expect(result.status).toBe("no_changes");
+        expect(seleniumBrowser.browser.isConnected()).toBe(true);
+        await expect(seleniumBrowser.page.title()).resolves.toBe(
+          "Selenium failure",
+        );
+        const followupPage = await seleniumBrowser.browser.newPage();
+        await followupPage.setContent("<title>Still usable</title>");
+        await expect(followupPage.title()).resolves.toBe("Still usable");
+        expect(quit).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns an actionable error for unsupported Firefox sessions", async () => {
+    const driver = {
+      getCapabilities: vi.fn(async () => ({
+        get: (name: string) => (name === "browserName" ? "firefox" : undefined),
+      })),
+      getWindowHandle: vi.fn(async () => "window-1"),
+      getCurrentUrl: vi.fn(async () => "https://example.test"),
+      getTitle: vi.fn(async () => "Example"),
+    } satisfies SeleniumWebDriver;
+    const debuggerInstance = createSeleniumDebugger({
+      github: {
+        owner: "acme",
+        repo: "automations",
+        baseBranch: "main",
+        token: "ghs_test",
+      },
+      agent: { model: "openai/gpt-5.4" },
+      fetch: vi.fn() as unknown as typeof fetch,
+      modelRunner: vi.fn(),
+    });
+
+    await expect(
+      debuggerInstance.debugFailure(new Error("failed"), driver),
+    ).resolves.toEqual({
+      status: "debugger_failed",
+      error: expect.stringContaining(
+        "Selenium debugging supports Chrome and Microsoft Edge",
+      ),
+    });
+  });
+
+  it("tells the caller how to fix a missing debugger address", async () => {
+    const driver = {
+      getCapabilities: vi.fn(async () => ({
+        get: (name: string) => (name === "browserName" ? "chrome" : undefined),
+      })),
+      getWindowHandle: vi.fn(async () => "window-1"),
+      getCurrentUrl: vi.fn(async () => "https://example.test"),
+      getTitle: vi.fn(async () => "Example"),
+    } satisfies SeleniumWebDriver;
+    const debuggerInstance = createSeleniumDebugger({
+      github: {
+        owner: "acme",
+        repo: "automations",
+        baseBranch: "main",
+        token: "ghs_test",
+      },
+      agent: { model: "openai/gpt-5.4" },
+      fetch: vi.fn() as unknown as typeof fetch,
+      modelRunner: vi.fn(),
+    });
+
+    await expect(
+      debuggerInstance.debugFailure(new Error("failed"), driver),
+    ).resolves.toEqual({
+      status: "debugger_failed",
+      error: expect.stringContaining(
+        "Keep the WebDriver session open and pass its live driver",
+      ),
+    });
+  });
+
+  browserTest(
+    "uses a Selenium 4 CDP endpoint exposed by a remote Chrome session",
+    async ({ seleniumBrowser }) => {
+      const driver = {
+        getCapabilities: vi.fn(async () => ({
+          browserName: "chrome",
+          "se:cdp": seleniumBrowser.cdpEndpoint,
+        })),
+        getWindowHandle: vi.fn(async () => seleniumBrowser.windowHandle),
+        getCurrentUrl: vi.fn(async () => seleniumBrowser.page.url()),
+        getTitle: vi.fn(async () => await seleniumBrowser.page.title()),
+      } satisfies SeleniumWebDriver;
+      const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+        const requestUrl = url.toString();
+        if (requestUrl.endsWith("/git/ref/heads/main")) {
+          return jsonResponse({ object: { sha: "base-commit" } });
+        }
+        if (requestUrl.endsWith("/git/commits/base-commit")) {
+          return jsonResponse({ sha: "base-commit", tree: { sha: "base-tree" } });
+        }
+        return jsonResponse({ message: "not found" }, { status: 404 });
+      }) as unknown as typeof fetch;
+      const runner = vi.fn<DebugAgentRunner>(async (context) => {
+        expect(context.framework).toBe("selenium");
+        expect(context.failure.title).toBe("Selenium failure");
+        expect(context.failure.domSnapshot).toContain("Live Selenium state");
+        return {
+          title: "No safe fix",
+          summary: "No safe fix found",
+          rationale: "The page needs more evidence.",
+          changes: [],
+        };
+      });
+      const debuggerInstance = createSeleniumDebugger({
+        github: {
+          owner: "acme",
+          repo: "automations",
+          baseBranch: "main",
+          token: "ghs_test",
+        },
+        agent: { model: "openai/gpt-5.4" },
+        fetch: fetchImpl,
+        modelRunner: runner,
+      });
+
+      const result = await debuggerInstance.debugFailure(
+        new Error("element click intercepted"),
+        driver,
+      );
+
+      expect(result.status).toBe("no_changes");
+      expect(seleniumBrowser.browser.isConnected()).toBe(true);
+      await expect(seleniumBrowser.page.title()).resolves.toBe(
+        "Selenium failure",
+      );
+    },
+  );
+
+  it("returns an actionable error when Chrome is no longer reachable", async () => {
+    const driver = {
+      getCapabilities: vi.fn(async () => ({
+        get: (name: string) => {
+          if (name === "browserName") return "chrome";
+          if (name === "goog:chromeOptions") {
+            return { debuggerAddress: "127.0.0.1:0" };
+          }
+          return undefined;
+        },
+      })),
+      getWindowHandle: vi.fn(async () => "CDwindow-closed"),
+      getCurrentUrl: vi.fn(async () => "https://example.test"),
+      getTitle: vi.fn(async () => "Example"),
+    } satisfies SeleniumWebDriver;
+    const debuggerInstance = createSeleniumDebugger({
+      github: {
+        owner: "acme",
+        repo: "automations",
+        baseBranch: "main",
+        token: "ghs_test",
+      },
+      agent: { model: "openai/gpt-5.4" },
+      fetch: vi.fn() as unknown as typeof fetch,
+      modelRunner: vi.fn(),
+    });
+
+    await expect(
+      debuggerInstance.debugFailure(new Error("failed"), driver),
+    ).resolves.toEqual({
+      status: "debugger_failed",
+      error: expect.stringContaining(
+        "Could not attach Libretto to the Selenium Chrome session",
+      ),
     });
   });
 });

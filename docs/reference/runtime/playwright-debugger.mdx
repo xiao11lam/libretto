@@ -1,11 +1,12 @@
 ---
-title: Playwright debugging agent
-description: Investigate failures and automatically open pull requests to fix Playwright scripts as they break.
+title: Browser automation debugging agent
+description: Investigate failures and automatically open pull requests to fix Playwright and Selenium scripts.
 "og:image": "https://libretto.sh/docs/og/reference/runtime/playwright-debugger.png"
 ---
 
-The Playwright debugging agent investigates failed browser automations and
-automatically opens pull requests that fix broken scripts.
+The browser automation debugging agent investigates failed Playwright and
+Selenium automations and automatically opens pull requests that fix broken
+scripts.
 
 `libretto-playwright-debugger` lets an existing Playwright script keep its current
 browser provider, retries, logging, and fallback logic while adding one agent
@@ -53,6 +54,58 @@ try {
 Keep the existing automation, retry, fallback, logging, and rethrow behavior in
 place around the new call.
 
+## Selenium Chrome and Edge
+
+The Selenium adapter supports TypeScript projects that use `selenium-webdriver`
+with Chrome or Microsoft Edge. Your project keeps Selenium as its production
+runtime. Libretto attaches through the debugger address that ChromeDriver or
+EdgeDriver exposes, uses Playwright only to inspect the live page, and proposes
+changes in the existing Selenium source.
+
+Remote Selenium 4 grids also work when their capabilities expose a `se:cdp`
+endpoint that the Libretto process can reach.
+
+Selenium projects must install Playwright because Libretto uses it for the live
+inspection connection:
+
+```bash
+pnpm add libretto-playwright-debugger playwright
+```
+
+```typescript
+import { Builder } from "selenium-webdriver";
+import { createSeleniumDebugger } from "libretto-playwright-debugger";
+
+const seleniumDebugger = createSeleniumDebugger({
+  github: {
+    owner: "acme",
+    repo: "automations",
+    baseBranch: "main",
+  },
+  agent: {
+    model: "openai/gpt-5.4",
+  },
+});
+
+const driver = await new Builder().forBrowser("MicrosoftEdge").build();
+
+try {
+  await runAutomation(driver);
+} catch (error) {
+  await seleniumDebugger.debugFailure(error, driver, {
+    includeFiles: ["src/workflows/referrals.ts"],
+  });
+  throw error;
+} finally {
+  await driver.quit();
+}
+```
+
+Call `debugFailure()` before `driver.quit()`. The adapter selects the active
+Selenium tab, disconnects Libretto when diagnosis finishes, and leaves the
+WebDriver session running for your existing cleanup code. Firefox, Safari, and
+Puppeteer are not supported by this adapter.
+
 ## What It Captures
 
 `debugFailure()` captures the error message, stack trace, page URL, page title,
@@ -91,9 +144,11 @@ Git API and opens a pull request whose body cites the observed evidence. If the
 evidence is insufficient for a safe fix, it opens no PR and returns
 `status: "no_changes"`.
 
-The debugger does not launch or close a second browser. Debugger infrastructure
-failures resolve with `status: "debugger_failed"` so the caller's existing
-fallback and original error handling can continue.
+The debugger does not launch or close a second browser. For Selenium, it adds a
+temporary CDP connection to the caller-owned Chrome or Edge browser and then
+disconnects without closing WebDriver. Debugger infrastructure failures resolve
+with `status: "debugger_failed"` so the caller's existing fallback and original
+error handling can continue.
 
 ## Model Keys
 

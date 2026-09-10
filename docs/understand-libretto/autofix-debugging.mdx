@@ -1,17 +1,17 @@
 ---
-title: Playwright debugging agent
-description: How Libretto investigates Playwright failures and opens pull requests that fix broken scripts.
+title: Browser automation debugging agent
+description: How Libretto investigates Playwright and Selenium failures and opens pull requests that fix broken scripts.
 "og:image": "https://libretto.sh/docs/og/understand-libretto/autofix-debugging.png"
 ---
 
-When a Playwright automation fails, Libretto's Playwright debugging agent
+When a Playwright or Selenium automation fails, Libretto's debugging agent
 investigates the failure against the live website and automatically opens a pull
-request that fixes the broken script. It turns a broken run into a reviewable
-change instead of a pager alert.
+request that fixes the broken script. Selenium support covers TypeScript
+workflows running Chrome or Microsoft Edge.
 
 You add one call in your script's failure path; Libretto does the rest. For the
 API and configuration, see the
-[Playwright debugging agent reference](../reference/runtime/playwright-debugger).
+[browser automation debugging agent reference](../reference/runtime/playwright-debugger).
 
 ## Why it inspects the live page
 
@@ -33,9 +33,10 @@ observed on the page.
    screenshot, and DOM snapshot, and reads the relevant source files from your
    repo at the base branch.
 2. **Investigate.** The agent snapshots the failed page's live accessibility
-   tree and runs Playwright code in the same browser context (for example,
-   checking whether a selector resolves) until it is confident about the root
-   cause.
+   tree and runs Playwright inspection code in the same browser context (for
+   example, checking whether a selector resolves) until it is confident about
+   the root cause. For Selenium failures, proposed source changes remain in
+   Selenium.
 3. **Fix.** It produces a minimal, full-file change for the files that must
    change — or, if the evidence is insufficient, it proposes nothing.
 4. **Open a PR.** The change is committed to a new branch and opened as a pull
@@ -58,7 +59,7 @@ an existing script.
 
 ## Relationship to error recovery
 
-The Playwright debugging agent fixes the deterministic workflow *after* a
-failure by opening a PR. For expected nondeterminism that should be handled
-*during* a run, use a narrow runtime recovery action instead — see
+The debugging agent fixes the deterministic workflow *after* a failure by
+opening a PR. For expected nondeterminism that should be handled *during* a
+run, use a narrow runtime recovery action instead — see
 [Error recovery](./error-handling-and-recovery).

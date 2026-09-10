@@ -15,7 +15,7 @@ const GET_STARTED_URL = "/signin?mode=signup";
 
 const SECTION_POINTS = [
   {
-    title: "Keep your existing Playwright scripts",
+    title: "Keep your existing browser scripts",
     body: "Add Libretto at the failure boundary without changing your fixtures, retries, logging, or deployment.",
   },
   {
@@ -43,19 +43,19 @@ const PR_AGENT_FAQS: FAQItem[] = [
     id: "runtime",
     question: "Do I need to use the Libretto runtime?",
     answer:
-      "No. Add libretto-playwright-debugger to an existing Playwright project, initialize the debugger once, and call debugFailure() from the failure path. Your current runtime, browser provider, deployment, and workflow structure stay in place.",
+      "No. Add libretto-playwright-debugger to an existing Playwright or TypeScript Selenium project, initialize the matching debugger once, and call debugFailure() from the failure path. Your current runtime, browser provider, deployment, and workflow structure stay in place.",
   },
   {
     id: "frameworks",
     question: "Does it work with Selenium or Puppeteer?",
     answer:
-      "Not yet. The current package accepts a Playwright Page, so the failed automation must run through Playwright. Selenium and Puppeteer would require separate adapters.",
+      "It supports TypeScript Selenium workflows running Chrome or Microsoft Edge. The adapter attaches to the live WebDriver browser and keeps proposed source changes in Selenium. Firefox, Safari, and Puppeteer are not supported yet.",
   },
   {
     id: "browser-provider",
     question: "Does it work with any browser or cloud browser provider?",
     answer:
-      "Yes. The PR agent works with local, self-hosted, and hosted browsers as long as your automation has a live Playwright Page and keeps it open while debugFailure() runs. You do not need to use Libretto Cloud for the browser session.",
+      "Yes for Playwright providers that expose a live Page. Selenium support requires a live Chrome or Microsoft Edge WebDriver session and a reachable CDP endpoint. Keep the failed browser open while debugFailure() runs; you do not need to use Libretto Cloud for the browser session.",
   },
   {
     id: "free",
@@ -97,7 +97,7 @@ function DebugAgentsHero() {
       </div>
       <div className="relative mx-auto grid max-w-[1120px] items-center gap-14 lg:grid-cols-[0.92fr_1.08fr] lg:gap-20">
         <div>
-          <Kicker className="mb-5">// PLAYWRIGHT PR AGENTS --</Kicker>
+          <Kicker className="mb-5">// BROWSER AUTOMATION PR AGENTS --</Kicker>
           <Text
             as="h1"
             size="5xl"
@@ -110,7 +110,7 @@ function DebugAgentsHero() {
               lineHeight: 0.98,
             }}
           >
-            Automatically fix failing Playwright scripts
+            Automatically fix failing browser scripts
           </Text>
           <Text
             as="p"
@@ -118,9 +118,9 @@ function DebugAgentsHero() {
             wrap="pretty"
             className="mb-9 max-w-[560px] leading-relaxed text-muted"
           >
-            Keep the browser automations you already run. When one fails,
-            Libretto investigates the live page and opens a GitHub pull request
-            with a proposed code fix.
+            Keep the Playwright or Selenium automations you already run. When
+            one fails, Libretto investigates the live page and opens a GitHub
+            pull request with a proposed code fix.
           </Text>
           <div className="flex w-fit flex-col items-center gap-3">
             <Button
@@ -152,8 +152,9 @@ function IntegrationSection() {
         kicker="// ONE FAILURE CALL --"
         title="Keep your scripts. Add the repair loop."
       >
-        Your existing Playwright script runs normally. The PR agent starts only
-        after a failure, when it can investigate what changed and propose a fix.
+        Your existing Playwright or Selenium script runs normally. The PR agent
+        starts only after a failure, when it can investigate what changed and
+        propose a fix.
       </SectionIntro>
 
       <div className="grid gap-px overflow-hidden rounded-xl border border-rule bg-rule sm:grid-cols-2">
