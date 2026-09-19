@@ -65,18 +65,3 @@ apps\desktop-runner\release\Libretto Workflow Runner Setup 0.0.0.exe
 ```
 
 Copy that setup file to another Windows computer and run it. The installed application includes Libretto, its TypeScript runtime, Playwright, and Chromium.
-
-### Portable executable
-
-To build an unpacked application without the setup wizard:
-
-```powershell
-cd .\libretto
-corepack pnpm desktop-runner:pack
-```
-
-Run the resulting executable from:
-
-```text
-apps\desktop-runner\release\win-unpacked\Libretto Workflow Runner.exe
-```
