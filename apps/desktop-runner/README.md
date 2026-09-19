@@ -53,7 +53,7 @@ Building the Windows application requires Node.js and Corepack on the developmen
 Open PowerShell and run:
 
 ```powershell
-cd "C:\Users\Xiao Admin\Documents\GitHub\libretto"
+cd .\libretto
 corepack pnpm install
 corepack pnpm desktop-runner:installer
 ```
@@ -71,7 +71,7 @@ Copy that setup file to another Windows computer and run it. The installed appli
 To build an unpacked application without the setup wizard:
 
 ```powershell
-cd "C:\Users\Xiao Admin\Documents\GitHub\libretto"
+cd .\libretto
 corepack pnpm desktop-runner:pack
 ```
 
