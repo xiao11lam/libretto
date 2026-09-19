@@ -130,7 +130,7 @@ async function startRunner(request: RunRequest): Promise<{ started: true }> {
       request.showBrowser ? "--headed" : "--headless",
     ],
     {
-      cwd: appRoot,
+      cwd: path.dirname(scriptPath),
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",

@@ -104,6 +104,16 @@ async function run(): Promise<void> {
       ? (runnable.viewport ?? { width: 1366, height: 768 })
       : { width: 1366, height: 768 };
     const context = await browser.newContext({ viewport });
+    await context.addInitScript(() => {
+      (globalThis as Record<string, unknown>).__name = (
+        target: unknown,
+        value: string,
+      ) =>
+        Object.defineProperty(target as object, "name", {
+          value,
+          configurable: true,
+        });
+    });
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     page.setDefaultNavigationTimeout(45_000);
@@ -113,7 +123,7 @@ async function run(): Promise<void> {
     if (isWorkflow(runnable)) {
       emit("log", `Running ${runnable.name ?? path.basename(scriptPath)}`);
       if (runnable.startUrl) {
-        await page.goto(runnable.startUrl, { waitUntil: "domcontentloaded" });
+        await page.goto(runnable.startUrl, { waitUntil: "commit" });
       }
       output = await runnable.run(
         { session: `desktop-${Date.now()}`, page },
