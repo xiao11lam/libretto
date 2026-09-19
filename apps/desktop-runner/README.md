@@ -2,6 +2,10 @@
 
 A Windows desktop application for running trusted Libretto TypeScript workflows.
 
+## Preview
+
+![Libretto Workflow Runner desktop application](docs/workflow-runner.png)
+
 ## End-user workflow
 
 1. Install `Libretto Workflow Runner Setup.exe`.
