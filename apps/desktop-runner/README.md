@@ -48,11 +48,35 @@ The first development run downloads the Chromium build used by Playwright.
 
 ## Windows installer
 
-From the repository root:
+Building the Windows application requires Node.js and Corepack on the development computer. End users do not need them.
+
+Open PowerShell and run:
 
 ```powershell
+cd "C:\Users\Xiao Admin\Documents\GitHub\libretto"
 corepack pnpm install
 corepack pnpm desktop-runner:installer
 ```
 
-The installer is written to `apps/desktop-runner/release/`.
+The first build downloads Chromium and may take a few minutes. The installable file is written to:
+
+```text
+apps\desktop-runner\release\Libretto Workflow Runner Setup 0.0.0.exe
+```
+
+Copy that setup file to another Windows computer and run it. The installed application includes Libretto, its TypeScript runtime, Playwright, and Chromium.
+
+### Portable executable
+
+To build an unpacked application without the setup wizard:
+
+```powershell
+cd "C:\Users\Xiao Admin\Documents\GitHub\libretto"
+corepack pnpm desktop-runner:pack
+```
+
+Run the resulting executable from:
+
+```text
+apps\desktop-runner\release\win-unpacked\Libretto Workflow Runner.exe
+```
